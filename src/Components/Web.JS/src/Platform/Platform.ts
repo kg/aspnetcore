@@ -20,6 +20,7 @@ export interface Platform {
   readUint64Field(baseAddress: Pointer, fieldOffset?: number): number;
   readFloatField(baseAddress: Pointer, fieldOffset?: number): number;
   readObjectField<T extends System_Object>(baseAddress: Pointer, fieldOffset?: number): T;
+  readObjectFieldRef<TObject extends System_Object_Ref, TResult extends System_Object_Ref>(object: TObject, fieldOffset: number, result: TResult): void;
   readStringField(baseAddress: Pointer, fieldOffset?: number, readBoolValueAsString?: boolean): string | null;
   readStructField<T extends Pointer>(baseAddress: Pointer, fieldOffset?: number): T;
 
@@ -42,3 +43,5 @@ export interface System_Int { System_Int__DO_NOT_IMPLEMENT: unknown }
 export interface System_String extends System_Object, MonoString { }
 export interface System_Array<T> extends System_Object, MonoArray { }
 export interface Pointer { Pointer__DO_NOT_IMPLEMENT: unknown }
+export interface System_Object_Ref extends Pointer { }
+export interface System_String_Ref extends System_Object_Ref { }

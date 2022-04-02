@@ -8,7 +8,7 @@ import { DotNet } from '@microsoft/dotnet-js-interop';
 import { attachDebuggerHotkey, hasDebuggingEnabled } from './MonoDebugger';
 import { showErrorNotification } from '../../BootErrors';
 import { WebAssemblyResourceLoader, LoadingResource } from '../WebAssemblyResourceLoader';
-import { Platform, System_Array, Pointer, System_Object, System_String, HeapLock } from '../Platform';
+import { Platform, System_Array, Pointer, System_Object, System_Object_Ref, HeapLock } from '../Platform';
 import { WebAssemblyBootResourceType } from '../WebAssemblyStartOptions';
 import { BootJsonData, ICUDataMode } from '../BootConfig';
 import { Blazor } from '../../GlobalExports';
@@ -69,11 +69,13 @@ export const monoPlatform: Platform = {
   },
 
   toUint8Array: function toUint8Array(array: System_Array<any>): Uint8Array {
-    const dataPtr = getArrayDataPointer(array);
-    const length = getValueI32(dataPtr);
-    const uint8Array = new Uint8Array(length);
-    uint8Array.set(Module.HEAPU8.subarray(dataPtr + 4, dataPtr + 4 + length));
-    return uint8Array;
+    // HACK
+    const root = MONO.mono_wasm_new_root(array);
+    try {
+      return BINDING.mono_primitive_array_to_js_typed_array_ref(Uint8Array, root.address, true, true);
+    } finally {
+      root.release();
+    }
   },
 
   getArrayLength: function getArrayLength(array: System_Array<any>): number {
@@ -111,34 +113,47 @@ export const monoPlatform: Platform = {
     return getValueI32((baseAddress as unknown as number) + (fieldOffset || 0)) as any as T;
   },
 
-  readStringField: function readHeapObject(baseAddress: Pointer, fieldOffset?: number, readBoolValueAsString?: boolean): string | null {
-    const fieldValue = getValueI32((baseAddress as unknown as number) + (fieldOffset || 0));
-    if (fieldValue === 0) {
-      return null;
-    }
+  readObjectFieldRef<TObject extends System_Object_Ref, TResult extends System_Object_Ref>(object: TObject, fieldOffset: number, result: TResult): void {
+    MONO.mono_wasm_copy_managed_pointer_from_field(result as any, object as any, fieldOffset);
+  },
 
-    if (readBoolValueAsString) {
+  readStringField: function readHeapObject(baseAddress: Pointer, fieldOffset?: number, readBoolValueAsString?: boolean): string | null {
+    const fieldAddress = (baseAddress as unknown as number) + (fieldOffset || 0);
+    // TODO: Creating a temporary one to discard immediately like this is unnecessary, the HeapLock can probably own
+    //  an external root for this purpose (its address can be changed with root._set_address, but don't tell anyone)
+    //  so that we can cheaply pass field offsets into root/ref APIs
+    const root = MONO.mono_wasm_new_external_root(<any>fieldAddress);
+    let result : string | undefined | null = undefined;
+    try {
+      // FIXME: Not thread safe. Probably not necessary either, unbox_mono_obj_root should return null
+      if (!root.value) {
+        return null;
+      }
+
+      if (currentHeapLock) {
+        // FIXME: This is not thread or gc safe, but without this applications seem to break
+        result = currentHeapLock.stringCache.get(<any>root.value);
+        if (result !== undefined) {
+          return result;
+        }
+      }
+
+      result = BINDING.unbox_mono_obj_root(root);
       // Some fields are stored as a union of bool | string | null values, but need to read as a string.
       // If the stored value is a bool, the behavior we want is empty string ('') for true, or null for false.
-      const unboxedValue = BINDING.unbox_mono_obj(fieldValue as any as System_Object);
-      if (typeof (unboxedValue) === 'boolean') {
-        return unboxedValue ? '' : null;
+      if (readBoolValueAsString && (typeof (result) === 'boolean')) {
+        return result ? '' : null;
       }
-      return unboxedValue;
-    }
 
-    let decodedString: string | null | undefined;
-    if (currentHeapLock) {
-      decodedString = currentHeapLock.stringCache.get(fieldValue);
-      if (decodedString === undefined) {
-        decodedString = BINDING.conv_string(fieldValue as any as System_String);
-        currentHeapLock.stringCache.set(fieldValue, decodedString);
+      if (currentHeapLock && (result !== undefined)) {
+        // FIXME: Not thread or gc safe
+        currentHeapLock.stringCache.set(<any>root.value, result);
       }
-    } else {
-      decodedString = BINDING.conv_string(fieldValue as any as System_String);
-    }
 
-    return decodedString;
+      return (result === undefined) ? null : result;
+    } finally {
+      root.release();
+    }
   },
 
   readStructField: function readStructField<T extends Pointer>(baseAddress: Pointer, fieldOffset?: number): T {

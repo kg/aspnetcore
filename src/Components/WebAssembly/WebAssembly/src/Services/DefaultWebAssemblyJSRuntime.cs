@@ -8,6 +8,7 @@ using Microsoft.AspNetCore.Components.WebAssembly.Hosting;
 using Microsoft.JSInterop;
 using Microsoft.JSInterop.Infrastructure;
 using Microsoft.JSInterop.WebAssembly;
+using System.Runtime.CompilerServices;
 
 namespace Microsoft.AspNetCore.Components.WebAssembly.Services;
 
@@ -84,10 +85,16 @@ internal sealed class DefaultWebAssemblyJSRuntime : WebAssemblyJSRuntime
     /// call, however that's not currently possible due to: <see href="https://github.com/dotnet/runtime/issues/53378"/>.
     /// </summary>
     /// <param name="id">Id of the byte array</param>
-    public static void NotifyByteArrayAvailable(int id)
+    public static unsafe void NotifyByteArrayAvailable(int id)
     {
 #pragma warning disable CS0618 // Type or member is obsolete
-        var data = Instance.InvokeUnmarshalled<byte[]>("Blazor._internal.retrieveByteArray");
+        byte[]? data = null;
+        var pData = (IntPtr)Unsafe.AsPointer(ref data);
+        Instance.InvokeUnmarshalled<IntPtr, object>("Blazor._internal.retrieveByteArrayRef", pData);
+        if (data == null)
+        {
+            throw new NullReferenceException("No byte array retrieved");
+        }
 #pragma warning restore CS0618 // Type or member is obsolete
 
         DotNetDispatcher.ReceiveByteArray(Instance, id, data);

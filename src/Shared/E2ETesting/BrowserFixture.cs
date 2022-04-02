@@ -35,7 +35,7 @@ public class BrowserFixture : IAsyncLifetime
 
     public string UserProfileDir { get; private set; }
 
-    public bool EnsureNotHeadless { get; set; }
+    public bool EnsureNotHeadless { get; set; } = true;
 
     public static void EnforceSupportedConfigurations()
     {
@@ -140,11 +140,13 @@ public class BrowserFixture : IAsyncLifetime
     private async Task<(IWebDriver browser, ILogs log)> CreateBrowserAsync(string context, ITestOutputHelper output)
     {
         var opts = new ChromeOptions();
+        opts.LeaveBrowserRunning = true;
+        opts.MinidumpPath = "C:\\mdump\\";
 
         // Force language to english for tests
         opts.AddUserProfilePreference("intl.accept_languages", "en");
 
-        if (!EnsureNotHeadless &&
+        if (false && !EnsureNotHeadless &&
             !Debugger.IsAttached &&
             !string.Equals(Environment.GetEnvironmentVariable("E2E_TEST_VISIBLE"), "true", StringComparison.OrdinalIgnoreCase))
         {

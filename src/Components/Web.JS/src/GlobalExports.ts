@@ -12,7 +12,7 @@ import { NavigationLock } from './NavigationLock';
 import { DefaultReconnectionHandler } from './Platform/Circuits/DefaultReconnectionHandler';
 import { CircuitStartOptions } from './Platform/Circuits/CircuitStartOptions';
 import { WebAssemblyStartOptions } from './Platform/WebAssemblyStartOptions';
-import { Platform, Pointer, System_String, System_Array, System_Object, System_Boolean, System_Byte, System_Int } from './Platform/Platform';
+import { Platform, Pointer, System_String, System_Array, System_Object, System_Boolean, System_Int, System_Object_Ref, System_String_Ref } from './Platform/Platform';
 import { getNextChunk, receiveDotNetDataStream } from './StreamingInterop';
 import { RootComponentsFunctions } from './Rendering/JSRootComponents';
 import { attachWebRendererInterop } from './Rendering/WebRendererInteropMethods';
@@ -36,10 +36,10 @@ interface IBlazor {
     forceCloseConnection?: () => Promise<void>;
     InputFile?: typeof InputFile,
     NavigationLock: typeof NavigationLock,
-    invokeJSFromDotNet?: (callInfo: Pointer, arg0: any, arg1: any, arg2: any) => any;
-    endInvokeDotNetFromJS?: (callId: System_String, success: System_Boolean, resultJsonOrErrorMessage: System_String) => void;
-    receiveByteArray?: (id: System_Int, data: System_Array<System_Byte>) => void;
-    retrieveByteArray?: () => System_Object;
+    invokeJSFromDotNetRef?: (callInfo: Pointer, resultAddress: System_Object_Ref, arg0: any, arg1: any, arg2: any) => void;
+    endInvokeDotNetFromJSRef?: (callId: System_String_Ref, success: System_Boolean, resultJsonOrErrorMessage: System_String_Ref) => void;
+    receiveByteArrayRef?: (id: System_Int, data: System_Object_Ref) => void;
+    retrieveByteArrayRef?: (result: System_Object_Ref) => void;
     getPersistedState?: () => System_String;
     attachRootComponentToElement?: (arg0: any, arg1: any, arg2: any, arg3: any) => void;
     registeredComponents?: {

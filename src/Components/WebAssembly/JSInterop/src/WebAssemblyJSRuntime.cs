@@ -5,6 +5,7 @@ using System.Diagnostics.CodeAnalysis;
 using System.Text.Json;
 using Microsoft.JSInterop.Infrastructure;
 using WebAssembly.JSInterop;
+using System.Runtime.CompilerServices;
 
 namespace Microsoft.JSInterop.WebAssembly;
 
@@ -34,7 +35,7 @@ public abstract class WebAssemblyJSRuntime : JSInProcessRuntime, IJSUnmarshalled
             MarshalledCallAsyncHandle = default
         };
 
-        var result = InternalCalls.InvokeJS<object, object, object, string>(out var exception, ref callInfo, null, null, null);
+        InternalCalls.InvokeJSRef<object, object, object, string>(ref callInfo, out string result, out string exception, null, null, null);
 
         return exception != null
             ? throw new JSException(exception)
@@ -53,27 +54,29 @@ public abstract class WebAssemblyJSRuntime : JSInProcessRuntime, IJSUnmarshalled
             MarshalledCallAsyncHandle = asyncHandle
         };
 
-        InternalCalls.InvokeJS<object, object, object, string>(out _, ref callInfo, null, null, null);
+        InternalCalls.InvokeJSRef<object, object, object, string>(ref callInfo, out _, out _, null, null, null);
     }
 
     /// <inheritdoc />
     [UnconditionalSuppressMessage("ReflectionAnalysis", "IL2026:RequiresUnreferencedCode", Justification = "TODO: This should be in the xml suppressions file, but can't be because https://github.com/mono/linker/issues/2006")]
-    protected override void EndInvokeDotNet(DotNetInvocationInfo callInfo, in DotNetInvocationResult dispatchResult)
+    protected override unsafe void EndInvokeDotNet(DotNetInvocationInfo callInfo, in DotNetInvocationResult dispatchResult)
     {
         var resultJsonOrErrorMessage = dispatchResult.Success
             ? dispatchResult.ResultJson!
             : dispatchResult.Exception!.ToString();
 #pragma warning disable CS0618 // Type or member is obsolete
-        InvokeUnmarshalled<string?, bool, string, object>("Blazor._internal.endInvokeDotNetFromJS",
-            callInfo.CallId, dispatchResult.Success, resultJsonOrErrorMessage);
+        var cid = callInfo.CallId;
+        InvokeUnmarshalled<IntPtr, bool, IntPtr, object>("Blazor._internal.endInvokeDotNetFromJSRef",
+            (IntPtr)Unsafe.AsPointer(ref cid), dispatchResult.Success, (IntPtr)Unsafe.AsPointer(ref resultJsonOrErrorMessage));
 #pragma warning restore CS0618 // Type or member is obsolete
     }
 
     /// <inheritdoc />
-    protected override void SendByteArray(int id, byte[] data)
+    protected override unsafe void SendByteArray(int id, byte[] data)
     {
 #pragma warning disable CS0618 // Type or member is obsolete
-        InvokeUnmarshalled<int, byte[], object>("Blazor._internal.receiveByteArray", id, data);
+        var pData = (IntPtr)Unsafe.AsPointer(ref data);
+        InvokeUnmarshalled<int, IntPtr, object>("Blazor._internal.receiveByteArrayRef", id, pData);
 #pragma warning restore CS0618 // Type or member is obsolete
     }
 
@@ -95,17 +98,17 @@ public abstract class WebAssemblyJSRuntime : JSInProcessRuntime, IJSUnmarshalled
         {
             case JSCallResultType.Default:
             case JSCallResultType.JSVoidResult:
-                var result = InternalCalls.InvokeJS<T0, T1, T2, TResult>(out exception, ref callInfo, arg0, arg1, arg2);
+                InternalCalls.InvokeJSRef<T0, T1, T2, TResult>(ref callInfo, out TResult result, out exception, arg0, arg1, arg2);
                 return exception != null
                     ? throw new JSException(exception)
                     : result;
             case JSCallResultType.JSObjectReference:
-                var id = InternalCalls.InvokeJS<T0, T1, T2, int>(out exception, ref callInfo, arg0, arg1, arg2);
+                InternalCalls.InvokeJSRef<T0, T1, T2, int>(ref callInfo, out int id, out exception, arg0, arg1, arg2);
                 return exception != null
                     ? throw new JSException(exception)
                     : (TResult)(object)new WebAssemblyJSObjectReference(this, id);
             case JSCallResultType.JSStreamReference:
-                var serializedStreamReference = InternalCalls.InvokeJS<T0, T1, T2, string>(out exception, ref callInfo, arg0, arg1, arg2);
+                InternalCalls.InvokeJSRef<T0, T1, T2, string>(ref callInfo, out string serializedStreamReference, out exception, arg0, arg1, arg2);
                 return exception != null
                     ? throw new JSException(exception)
                     : (TResult)(object)DeserializeJSStreamReference(serializedStreamReference);

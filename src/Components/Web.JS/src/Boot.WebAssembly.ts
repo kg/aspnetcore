@@ -5,14 +5,14 @@
 import { DotNet } from '@microsoft/dotnet-js-interop';
 import { Blazor } from './GlobalExports';
 import * as Environment from './Environment';
-import { byteArrayBeingTransferred, Module, BINDING, monoPlatform } from './Platform/Mono/MonoPlatform';
+import { byteArrayBeingTransferred, Module, BINDING, MONO, monoPlatform } from './Platform/Mono/MonoPlatform';
 import { renderBatch, getRendererer, attachRootComponentToElement, attachRootComponentToLogicalElement } from './Rendering/Renderer';
 import { SharedMemoryRenderBatch } from './Rendering/RenderBatch/SharedMemoryRenderBatch';
 import { shouldAutoStart } from './BootCommon';
 import { WebAssemblyResourceLoader } from './Platform/WebAssemblyResourceLoader';
 import { WebAssemblyConfigLoader } from './Platform/WebAssemblyConfigLoader';
 import { BootConfigResult } from './Platform/BootConfig';
-import { Pointer, System_Array, System_Boolean, System_Byte, System_Int, System_Object, System_String } from './Platform/Platform';
+import { Pointer, System_Boolean, System_Int, System_Object_Ref, System_String, System_String_Ref } from './Platform/Platform';
 import { WebAssemblyStartOptions } from './Platform/WebAssemblyStartOptions';
 import { WebAssemblyComponentAttacher } from './Platform/WebAssemblyComponentAttacher';
 import { discoverComponents, discoverPersistedState, WebAssemblyComponentDescriptor } from './Services/ComponentDescriptorDiscovery';
@@ -51,14 +51,28 @@ async function boot(options?: Partial<WebAssemblyStartOptions>): Promise<void> {
   Blazor._internal.getApplyUpdateCapabilities = () => DotNet.invokeMethod('Microsoft.AspNetCore.Components.WebAssembly', 'GetApplyUpdateCapabilities');
 
   // Configure JS interop
-  Blazor._internal.invokeJSFromDotNet = invokeJSFromDotNet;
-  Blazor._internal.endInvokeDotNetFromJS = endInvokeDotNetFromJS;
-  Blazor._internal.receiveByteArray = receiveByteArray;
-  Blazor._internal.retrieveByteArray = retrieveByteArray;
+  Blazor._internal.invokeJSFromDotNetRef = invokeJSFromDotNetRef;
+  Blazor._internal.endInvokeDotNetFromJSRef = endInvokeDotNetFromJSRef;
+  Blazor._internal.receiveByteArrayRef = receiveByteArrayRef;
+  Blazor._internal.retrieveByteArrayRef = retrieveByteArrayRef;
 
   // Configure environment for execution under Mono WebAssembly with shared-memory rendering
   const platform = Environment.setPlatform(monoPlatform);
   Blazor.platform = platform;
+
+  const renderBatchCallback = (hazardBuffer: any, browserRendererId: number, batchAddress: Pointer) => {
+    // Store the batch address into the hazard buffer to pin it
+    batchAddress = hazardBuffer.set(0, batchAddress);
+    // Now store the arrays it points to into the hazard buffer as well to pin them
+    // RenderBatch.cs lists four ArrayRange fields and each ArrayRange is a (T[] arr, int count) pair
+    for (let i = 0; i < 4; i++) {
+      const offset = <any>batchAddress + (i * 8);
+      hazardBuffer.copy_value_from_address(i + 1, offset);
+    }
+    const batch = new SharedMemoryRenderBatch(batchAddress);
+    renderBatch(browserRendererId, batch);
+  };
+
   Blazor._internal.renderBatch = (browserRendererId: number, batchAddress: Pointer) => {
     // We're going to read directly from the .NET memory heap, so indicate to the platform
     // that we don't want anything to modify the memory contents during this time. Currently this
@@ -67,7 +81,7 @@ async function boot(options?: Partial<WebAssemblyStartOptions>): Promise<void> {
     // that GC compaction isn't allowed during this critical section.
     const heapLock = monoPlatform.beginHeapLock();
     try {
-      renderBatch(browserRendererId, new SharedMemoryRenderBatch(batchAddress));
+      MONO.mono_wasm_with_hazard_buffer(16, renderBatchCallback, browserRendererId, batchAddress);
     } finally {
       heapLock.release();
     }
@@ -153,64 +167,90 @@ async function boot(options?: Partial<WebAssemblyStartOptions>): Promise<void> {
 }
 
 // obsolete, legacy, don't use for new code!
-function invokeJSFromDotNet(callInfo: Pointer, arg0: any, arg1: any, arg2: any): any {
+function invokeJSFromDotNetRef(callInfo: Pointer, resultAddress: System_Object_Ref, arg0: any, arg1: any, arg2: any): void {
+  // NOTE: This function stores non-managed-pointer things into resultRoot! Under *any other circumstances*,
+  //  this is incorrect and you should not do it! However, in this case the caller is providing the storage
+  //  for this root, so if the caller is asking us to put a regular int in there, we can trust that they are
+  //  not providing us an address that is meant to house a managed pointer, so the GC won't touch it and crash.
+  const resultRoot = MONO.mono_wasm_new_external_root<System_String>(<any>resultAddress);
   const functionIdentifier = monoPlatform.readStringField(callInfo, 0)!;
   const resultType = monoPlatform.readInt32Field(callInfo, 4);
   const marshalledCallArgsJson = monoPlatform.readStringField(callInfo, 8);
   const targetInstanceId = monoPlatform.readUint64Field(callInfo, 20);
 
-  if (marshalledCallArgsJson !== null) {
-    const marshalledCallAsyncHandle = monoPlatform.readUint64Field(callInfo, 12);
+  try {
+    resultRoot.clear();
 
-    if (marshalledCallAsyncHandle !== 0) {
-      DotNet.jsCallDispatcher.beginInvokeJSFromDotNet(marshalledCallAsyncHandle, functionIdentifier, marshalledCallArgsJson, resultType, targetInstanceId);
-      return 0;
-    } else {
-      const resultJson = DotNet.jsCallDispatcher.invokeJSFromDotNet(functionIdentifier, marshalledCallArgsJson, resultType, targetInstanceId)!;
-      return resultJson === null ? 0 : BINDING.js_string_to_mono_string(resultJson);
-    }
-  } else {
-    const func = DotNet.jsCallDispatcher.findJSFunction(functionIdentifier, targetInstanceId);
-    const result = func.call(null, arg0, arg1, arg2);
+    if (marshalledCallArgsJson !== null) {
+      const marshalledCallAsyncHandle = monoPlatform.readUint64Field(callInfo, 12);
 
-    switch (resultType) {
-      case DotNet.JSCallResultType.Default:
-        return result;
-      case DotNet.JSCallResultType.JSObjectReference:
-        return DotNet.createJSObjectReference(result).__jsObjectId;
-      case DotNet.JSCallResultType.JSStreamReference: {
-        const streamReference = DotNet.createJSStreamReference(result);
-        const resultJson = JSON.stringify(streamReference);
-        return BINDING.js_string_to_mono_string(resultJson);
+      if (marshalledCallAsyncHandle !== 0) {
+        DotNet.jsCallDispatcher.beginInvokeJSFromDotNet(marshalledCallAsyncHandle, functionIdentifier, marshalledCallArgsJson, resultType, targetInstanceId);
+      } else {
+        const resultJson = DotNet.jsCallDispatcher.invokeJSFromDotNet(functionIdentifier, marshalledCallArgsJson, resultType, targetInstanceId)!;
+        if (resultJson !== null) {
+          BINDING.js_string_to_mono_string_root(resultJson, resultRoot);
+        }
       }
-      case DotNet.JSCallResultType.JSVoidResult:
-        return null;
-      default:
-        throw new Error(`Invalid JS call result type '${resultType}'.`);
+    } else {
+      const func = DotNet.jsCallDispatcher.findJSFunction(functionIdentifier, targetInstanceId);
+      const result = func.call(null, arg0, arg1, arg2);
+
+      switch (resultType) {
+        case DotNet.JSCallResultType.Default:
+          resultRoot.value = result;
+          return;
+        case DotNet.JSCallResultType.JSObjectReference:
+          resultRoot.value = DotNet.createJSObjectReference(result).__jsObjectId;
+          return;
+        case DotNet.JSCallResultType.JSStreamReference: {
+          const streamReference = DotNet.createJSStreamReference(result);
+          const resultJson = JSON.stringify(streamReference);
+          BINDING.js_string_to_mono_string_root(resultJson, resultRoot);
+          return;
+        }
+        case DotNet.JSCallResultType.JSVoidResult:
+          return;
+        default:
+          throw new Error(`Invalid JS call result type '${resultType}'.`);
+      }
     }
+  } finally {
+    resultRoot.release();
   }
 }
 
-function endInvokeDotNetFromJS(callId: System_String, success: System_Boolean, resultJsonOrErrorMessage: System_String): void {
-  const callIdString = BINDING.conv_string(callId)!;
-  const successBool = (success as any as number) !== 0;
-  const resultJsonOrErrorMessageString = BINDING.conv_string(resultJsonOrErrorMessage)!;
-  DotNet.jsCallDispatcher.endInvokeDotNetFromJS(callIdString, successBool, resultJsonOrErrorMessageString);
+function endInvokeDotNetFromJSRef(callId: System_String_Ref, success: System_Boolean, resultJsonOrErrorMessage: System_String_Ref): void {
+  const callIdRoot = MONO.mono_wasm_new_external_root<System_String>(<any>callId);
+  const resultJsonOrErrorMessageRoot = MONO.mono_wasm_new_external_root<System_String>(<any>resultJsonOrErrorMessage);
+  try {
+    const callIdString = BINDING.conv_string_root(callIdRoot)!;
+    const successBool = (success as any as number) !== 0;
+    const resultJsonOrErrorMessageString = BINDING.conv_string_root(resultJsonOrErrorMessageRoot)!;
+    DotNet.jsCallDispatcher.endInvokeDotNetFromJS(callIdString, successBool, resultJsonOrErrorMessageString);
+  } finally {
+    callIdRoot.release();
+    resultJsonOrErrorMessageRoot.release();
+  }
 }
 
-function receiveByteArray(id: System_Int, data: System_Array<System_Byte>): void {
+function receiveByteArrayRef(id: System_Int, data: System_Object_Ref): void {
   const idLong = id as unknown as number;
-  const dataByteArray = monoPlatform.toUint8Array(data);
+  const dataByteArray = BINDING.mono_primitive_array_to_js_typed_array_ref(Uint8Array, data as any, true, true);
   DotNet.jsCallDispatcher.receiveByteArray(idLong, dataByteArray);
 }
 
-function retrieveByteArray(): System_Object {
+function retrieveByteArrayRef(result: System_Object_Ref): void {
   if (byteArrayBeingTransferred === null) {
     throw new Error('Byte array not available for transfer');
   }
 
-  const typedArray = BINDING.js_typed_array_to_array(byteArrayBeingTransferred);
-  return typedArray;
+  const resultRoot = MONO.mono_wasm_new_external_root(result as any);
+  try {
+    BINDING.js_typed_array_to_array_root(byteArrayBeingTransferred, resultRoot as any);
+  } finally {
+    resultRoot.release();
+  }
 }
 
 function inAuthRedirectIframe(): boolean {
