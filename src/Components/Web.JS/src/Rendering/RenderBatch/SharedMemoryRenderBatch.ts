@@ -3,8 +3,7 @@
 
 import { platform } from '../../Environment';
 import { RenderBatch, ArrayRange, ArrayBuilderSegment, RenderTreeDiff, RenderTreeEdit, RenderTreeFrame, ArrayValues, EditType, FrameType } from './RenderBatch';
-import { Pointer, System_Array } from '../../Platform/Platform';
-import { WasmRoot } from '../../Platform/Mono/MonoTypes';
+import { Pointer, System_Array, System_Object } from '../../Platform/Platform';
 
 // Used when running on Mono WebAssembly for shared-memory interop. The code here encapsulates
 // our knowledge of the memory layout of RenderBatch and all referenced types.
@@ -12,19 +11,8 @@ import { WasmRoot } from '../../Platform/Mono/MonoTypes';
 // In this implementation, all the DTO types are really heap pointers at runtime, hence all
 // the casts to 'any' whenever we pass them to platform.read.
 
-let scratchRoot1 : WasmRoot;
-/*
-let scratchRoot2 : WasmRoot;
-let scratchRoot3 : WasmRoot;
-*/
-
 export class SharedMemoryRenderBatch implements RenderBatch {
   constructor(private batchAddress: Pointer) {
-    scratchRoot1 = MONO.mono_wasm_new_root();
-    /*
-    scratchRoot2 = MONO.mono_wasm_new_root();
-    scratchRoot3 = MONO.mono_wasm_new_root();
-    */
   }
 
   // Keep in sync with memory layout in RenderBatch.cs
@@ -76,15 +64,7 @@ export class SharedMemoryRenderBatch implements RenderBatch {
 // Keep in sync with memory layout in ArrayRange.cs
 const arrayRangeReader = {
   structLength: 8,
-  values: <T>(arrayRange: ArrayRange<T>): ArrayValues<T> => {
-    // FIXME: Not fully GC/thread safe
-    // Next steps: make arrayRange arg a System_Object_Ref or a root, pass result slot instead of returning
-    scratchRoot1.value = arrayRange as any;
-    MONO.mono_wasm_copy_managed_pointer_from_field(scratchRoot1.address, scratchRoot1.address, 0);
-    const result = scratchRoot1.value;
-    scratchRoot1.clear();
-    return result as any;
-  },
+  values: <T>(arrayRange: ArrayRange<T>): ArrayValues<T> => platform.readObjectField<System_Array<T>>(arrayRange as any, 0) as any as ArrayValues<T>,
   count: <T>(arrayRange: ArrayRange<T>): number => platform.readInt32Field(arrayRange as any, 4),
 };
 
@@ -92,15 +72,10 @@ const arrayRangeReader = {
 const arrayBuilderSegmentReader = {
   structLength: 12,
   values: <T>(arrayBuilderSegment: ArrayBuilderSegment<T>): ArrayValues<T> => {
-    // FIXME: Not fully GC/thread safe
-    // Next steps: make arrayBuilderSegment arg a System_Object_Ref or a root, pass result slot instead of returning
-    // Double dereference
-    scratchRoot1.value = arrayBuilderSegment as any;
-    MONO.mono_wasm_copy_managed_pointer_from_field(scratchRoot1.address, scratchRoot1.address, 0);
-    MONO.mono_wasm_copy_managed_pointer_from_field(scratchRoot1.address, scratchRoot1.address, 0);
-    const result = scratchRoot1.value;
-    scratchRoot1.clear();
-    return result as any;
+    // Evaluate arrayBuilderSegment->_builder->_items, i.e., two dereferences needed
+    const builder = platform.readObjectField<System_Object>(arrayBuilderSegment as any, 0);
+    const builderFieldsAddress = platform.getObjectFieldsBaseAddress(builder);
+    return platform.readObjectField<System_Array<T>>(builderFieldsAddress, 0) as any as ArrayValues<T>;
   },
   offset: <T>(arrayBuilderSegment: ArrayBuilderSegment<T>): number => platform.readInt32Field(arrayBuilderSegment as any, 4),
   count: <T>(arrayBuilderSegment: ArrayBuilderSegment<T>): number => platform.readInt32Field(arrayBuilderSegment as any, 8),
